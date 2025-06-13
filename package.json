@@ -1,0 +1,5 @@
+{
+  "name": "TradeGuardian",
+  "private": true,
+  "workspaces": ["dash"]
+}
