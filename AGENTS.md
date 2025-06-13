@@ -1,112 +1,98 @@
-Step 1: repo-bootstrap
-1.1 Objective
-Set up a clean, language-agnostic mono-repo with automatic lint-build-test feedback so every later agent can branch off a consistent foundation.
+2.1 Objective
+Build an async Python service that consumes real-time quotes / trades from Polygon (or IEX Cloud sandbox) and publishes them to a Kafka topic (quotes, trades) using Avro-encoded messages.
 
-1.2 Tasks & Solo-Tests (list format)
-1.2.1 Create the repo
+2.2 Tasks & Solo-Tests (list format)
+2.2.1 Local Kafka sandbox
 
-Action: git init TradeGuardian && cd TradeGuardian
+Action: add docker-compose.yml with single-broker Kafka + Schema Registry.
 
-Immediate test: git status shows On branch main and nothing to commit.
+Immediate test: docker compose up -d kafka exposes localhost:9092; kafka-topics --bootstrap-server localhost:9092 --list returns an empty list.
 
-1.2.2 Skeleton directories
+2.2.2 Python project scaffold
 
-Action: mkdir -p research src dash ops infra
+Action: create package tg_data_adapter/ with __init__.py and main.py.
 
-Immediate test: ls -1 lists the five top-level folders.
+Immediate test: python -m tg_data_adapter.main --help prints CLI usage text.
 
-1.2.3 README stubs
+2.2.3 Dependency pinning
 
-Action: create README.md in root and placeholder READMEs in each top-level folder.
+Action: add poetry or requirements.txt entries:
 
-Immediate test: grep -R "## TradeGuardian" . finds the root header.
-
-1.2.4 .gitignore
-
-Action: combine GitHub Python, C++, and Node templates; add /dist/ and /coverage/.
-
-Immediate test: git check-ignore -v /tmp/foo.pyc prints the ignore rule.
-
-1.2.5 Pre-commit configuration
-
-Action: pre-commit init-template and add hooks:
-
-yaml
+css
 Copy
 Edit
-- repo: https://github.com/psf/black
-  rev: 24.4.2
-  hooks: [id: black]
-- repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v17.0.6
-  hooks: [id: clang-format]
-Immediate test: pre-commit run --all-files finishes with Passed.
+aiohttp
+confluent-kafka[avro]
+python-dotenv
+Immediate test: pip install -r requirements.txt finishes without error.
 
-1.2.6 clang-format style file
+2.2.4 Avro schema
 
-Action: add .clang-format (Google style, ColumnLimit: 100).
+Action: define schemas/quote.avsc (top-of-book fields) and schemas/trade.avsc.
 
-Immediate test: clang-format --dry-run -Werror src/example.cpp prints nothing.
+Immediate test: run avro-tools cat schemas/quote.avsc and verify valid JSON.
 
-1.2.7 Black config
+2.2.5 Config management
 
-Action: add pyproject.toml with line-length = 100.
+Action: add .env.sample with POLYGON_API_KEY, KAFKA_BOOTSTRAP, SCHEMA_REGISTRY_URL.
 
-Immediate test: black --check research/ exits with code 0.
+Immediate test: dotenv-linter reports no issues.
 
-1.2.8 Python virtual-env helper
+2.2.6 Async websocket client
 
-Action: add make venv target that creates .venv.
+Action: implement PolygonClient in client.py using aiohttp to subscribe to T.* (trades) and Q.* (quotes).
 
-Immediate test: make venv && . .venv/bin/activate && python -V shows Python 3.x.
+Immediate test: pytest tests/test_polygon_client.py::test_handshake asserts the client receives a connected status message from sandbox within 2 s.
 
-1.2.9 CMake bootstrap
+2.2.7 Avro producer wrapper
 
-Action: minimal infra/tooling/CMakeLists.txt to compile “hello-world”.
+Action: implement KafkaAvroProducer with schema-registry auto-registration.
 
-Immediate test: cmake -S . -B build configures without errors.
+Immediate test: pytest tests/test_producer.py serializes a fake record, produces to quotes, consumes it back (with kafka-console-consumer) and decodes identical payload.
 
-1.2.10 Node front-end init
+2.2.8 Adapter orchestration
 
-Action: npm create next-app dash --ts --eslint --tailwind.
+Action: in main.py, wire client → async queue → producer; add graceful shutdown.
 
-Immediate test: npm run --workspace=dash lint passes.
+Immediate test: run python -m tg_data_adapter.main --dry-run 5 (5 s) and ensure at least one Produced log line appears.
 
-1.2.11 GitHub Action: lint-build-test
+2.2.9 Metrics & logging
 
-Action: create .github/workflows/lint-build-test.yml with jobs:
+Action: expose Prometheus counter messages_produced_total on :8000/metrics.
 
-lint-py: black --check
+Immediate test: curl localhost:8000/metrics contains the counter name.
 
-lint-cpp: clang-format --dry-run
+2.2.10 PyTest integration (self-test)
 
-lint-js: npm run lint in dash
+Action: tests/test_data_adapter.py spins up the adapter for 60 s against sandbox, then queries Kafka via kafka-python to count records.
 
-build-cpp: cmake .. && make -j
+Immediate test: asserts ≥ 100 messages/min in the quotes topic. (Use @pytest.mark.skipif when sandbox is offline.)
 
-pytest: placeholder that always passes
+2.3 Deliverables
+Directory tg_data_adapter/ with production-ready code
 
-Immediate test: push a branch; PR shows all jobs green.
+Avro schemas in schemas/quote.avsc and schemas/trade.avsc
 
-1.2.12 Branch protection
+docker-compose.yml for local Kafka + Schema Registry
 
-Action: enable “Require status checks to pass” on main.
+Full unit & integration test suite under tests/
 
-Immediate test: attempt to merge a failing commit—GitHub blocks it.
+Prometheus metrics endpoint
 
-1.3 Deliverables
-Committed directory tree: research/, src/, dash/, ops/, infra/
-
-.pre-commit-config.yaml, .clang-format, pyproject.toml
-
-GitHub Action lint-build-test visible in the Actions tab
-
-1.4 End-to-End Self-Test
+2.4 End-to-End Self-Test
 bash
 Copy
 Edit
-# from repo root
-pre-commit run --all-files               # local lint check
-gh workflow run lint-build-test          # trigger CI manually
-gh run list --limit 1 --status success   # confirm ✅
-If each task-level test passes and the final CI run is green, Step 1 is complete, providing a solid scaffold and automated quality gates for all future work.
+# 1. Spin up infra
+docker compose up -d kafka schema-registry
+
+# 2. Run adapter for one minute
+POLYGON_API_KEY=$YOUR_KEY python -m tg_data_adapter.main --run 60
+
+# 3. Count messages
+kafka-consumer-groups --bootstrap-server localhost:9092 \
+  --describe --group test-group --topic quotes
+
+# 4. Verify ≥ 100 messages/min
+pytest tests/test_data_adapter.py
+When the integration test confirms the 100-messages-per-minute threshold and the Prometheus endpoint responds, Step 2 is complete, and downstream services can safely consume live market data from Kafka.
